@@ -1,0 +1,26 @@
+# ══════════════════════════════════════════════════════════════
+#  Orqestra Background Worker — Dockerfile
+#  Runs Dramatiq workers for async job processing
+# ══════════════════════════════════════════════════════════════
+
+FROM python:3.11-slim AS builder
+
+WORKDIR /build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential curl && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+FROM python:3.11-slim AS runtime
+
+WORKDIR /app
+COPY --from=builder /install /usr/local
+
+RUN useradd -m -u 1000 orqestra && chown -R orqestra:orqestra /app
+USER orqestra
+
+COPY --chown=orqestra:orqestra app/ ./app/
+
+# Worker entrypoint — processes background jobs from Redis queue
+CMD ["python", "-m", "dramatiq", "app.worker", "--processes", "2", "--threads", "4"]
