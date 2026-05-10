@@ -116,3 +116,46 @@ View traces in real-time at `http://localhost:8001`.
 ### **4. Applied GenAI Patterns**
 - **Critique-as-Guardrail**: We don't rely on the LLM to be safe by default. We implemented a dedicated **CritiqueAgent** that reviews the work of others, a standard pattern for high-reliability AI.
 - **Self-Improvement Loop**: We implemented the **Meta-Agent** to solve the "Prompt Drift" problem, allowing the system to propose its own optimizations based on actual failure data.
+
+---
+
+## 🔌 Integration Guide
+
+If you want to use Orqestra in your own project, choose one of the following paths:
+
+### **Method A: API Integration (Recommended)**
+Run Orqestra as a standalone microservice and call it from your main application (Node.js, Go, Python, etc.).
+
+1.  **Submit a Task**:
+    ```bash
+    curl -X POST http://localhost:8000/api/v1/query -d '{"query": "Your task here"}'
+    ```
+2.  **Poll for Results**:
+    ```bash
+    curl http://localhost:8000/api/v1/trace/{query_id}
+    ```
+
+### **Method B: Direct Python Import**
+If your project is also Python, you can import the Graph directly into your code.
+
+```python
+from app.orchestrator.graph import app_graph
+from app.schemas.context import SharedContext
+
+# Initialize state
+initial_state = {"context": SharedContext(query="Your question").model_dump()}
+
+# Execute the graph
+async for output in app_graph.astream(initial_state):
+    print(f"Step: {list(output.keys())[0]}")
+```
+
+### **Method C: Real-time Streaming (SSE)**
+For interactive UIs, subscribe to the SSE stream to show agent progress live:
+```javascript
+const eventSource = new EventSource('http://localhost:8000/api/v1/query/stream/{query_id}');
+eventSource.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    console.log(`Agent ${data.agent_id} is working...`);
+};
+```
