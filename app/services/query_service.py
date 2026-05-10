@@ -26,12 +26,15 @@ class QueryService:
         self._db = db
         self._repo = TraceRepository(db)
 
-    async def run_query(self, query: str) -> SharedContext:
+    async def run_query(self, query: str, query_id: str | None = None) -> SharedContext:
         """
         Execute the full multi-agent pipeline for a query.
         Persists trace and publishes SSE events.
         """
         context = SharedContext(user_query=query)
+        if query_id:
+            context.query_id = UUID(query_id)
+        
         query_id = str(context.query_id)
         start = time.perf_counter()
 

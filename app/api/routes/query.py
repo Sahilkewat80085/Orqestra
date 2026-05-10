@@ -15,8 +15,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.session import get_db
 from app.logging.logger import get_logger
-from app.services.query_service import QueryService
+from app.schemas.context import SharedContext
 from app.streaming.subscriber import stream_query_events
+from app.worker import run_query_task
 
 router = APIRouter(prefix="/api/v1", tags=["Query"])
 log = get_logger("api.query")
@@ -46,7 +47,6 @@ class QueryResponse(BaseModel):
 )
 async def submit_query(
     request: QueryRequest,
-    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     if not request.query.strip():
@@ -67,16 +67,12 @@ async def submit_query(
             },
         )
 
-    service = QueryService(db)
-
-    # Run pipeline in background — SSE stream delivers results
-    background_tasks.add_task(service.run_query, request.query)
-
-    # We need the query_id before the pipeline runs
-    # Generate it deterministically from the service
-    from app.schemas.context import SharedContext
+    # Generate the query_id immediately
     ctx = SharedContext(user_query=request.query)
     query_id = str(ctx.query_id)
+
+    # Dispatch to the background Worker (Dramatiq)
+    run_query_task.send(request.query, query_id)
 
     log.info("query_submitted", query_id=query_id)
 
