@@ -33,6 +33,5 @@ def run_query_task(query: str, query_id: str):
             service = QueryService(db)
             await service.run_query(query, query_id=query_id)
     
-    # Run the async loop
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(_run())
+    # asyncio.run() handles creating and closing the event loop for this thread
+    asyncio.run(_run())
