@@ -156,6 +156,15 @@ def policy_violation(
     )
 
 
+def pipeline_error(query_id: str, error: str, seq: int = 0) -> StreamEvent:
+    return StreamEvent(
+        query_id=query_id,
+        event_type=EventType.PIPELINE_ERROR,
+        payload={"error": error},
+        sequence=seq,
+    )
+
+
 def pipeline_complete(query_id: str, total_latency_ms: float, seq: int = 0) -> StreamEvent:
     return StreamEvent(
         query_id=query_id,

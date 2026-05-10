@@ -17,6 +17,8 @@ from app.database.models import Base
 
 def _build_dsn() -> str:
     """Construct the async PostgreSQL DSN from environment settings."""
+    if settings.database_url:
+        return settings.database_url
     return (
         f"postgresql+asyncpg://{settings.postgres_user}:{settings.postgres_password}"
         f"@{settings.postgres_host}:{settings.postgres_port}/{settings.postgres_db}"

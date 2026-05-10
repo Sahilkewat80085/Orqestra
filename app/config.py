@@ -7,7 +7,7 @@ All configuration MUST come from here — no hardcoded values anywhere else.
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import List
+from typing import List, Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     postgres_db: str = "orqestra"
     postgres_user: str = "orqestra"
     postgres_password: str = Field(..., description="PostgreSQL password")
+    database_url: Optional[str] = Field(None, description="Complete PostgreSQL DSN")
 
     # ── Redis ─────────────────────────────────────────────────────────────────
     redis_host: str = "localhost"

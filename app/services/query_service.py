@@ -94,11 +94,3 @@ class QueryService:
         }
 
 
-def pipeline_error(query_id: str, error: str, seq: int = 0):
-    from app.streaming.events import StreamEvent, EventType
-    return StreamEvent(
-        query_id=query_id,
-        event_type=EventType.PIPELINE_ERROR,
-        payload={"error": error},
-        sequence=seq,
-    )

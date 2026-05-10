@@ -21,6 +21,7 @@ RUN useradd -m -u 1000 orqestra && chown -R orqestra:orqestra /app
 USER orqestra
 
 COPY --chown=orqestra:orqestra app/ ./app/
+COPY --chown=orqestra:orqestra scripts/ ./scripts/
 
 # Worker entrypoint — processes background jobs from Redis queue
 CMD ["python", "-m", "dramatiq", "app.worker", "--processes", "2", "--threads", "4"]
