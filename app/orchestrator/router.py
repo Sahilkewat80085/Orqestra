@@ -93,6 +93,7 @@ class OrchestratorRouter:
         prompt = _ORCHESTRATOR_PROMPT.format(query=context.user_query)
         input_hash = hash_content(prompt)
 
+        raw = ""
         try:
             response = await self._llm.ainvoke(prompt)
             raw = response.content.strip()
@@ -127,7 +128,7 @@ class OrchestratorRouter:
 
         latency_ms = (time.perf_counter() - start) * 1000
         output_hash = hash_content(decision.model_dump())
-        token_count = count_tokens(raw if "raw" in dir() else str(decision))
+        token_count = count_tokens(raw if raw else str(decision))
 
         agent_logger.completed(
             latency_ms=latency_ms,

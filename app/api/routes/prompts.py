@@ -18,14 +18,13 @@ router = APIRouter(prefix="/api/v1/prompts", tags=["Prompts"])
 log = get_logger("api.prompts")
 
 
+from typing import Optional
+
 class ApprovalRequest(BaseModel):
     version_id: str
     action: str          # "approve" or "reject"
     approved_by: str     # Human reviewer identifier
     reason: Optional[str] = None
-
-
-from typing import Optional
 
 
 @router.post(
