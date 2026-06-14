@@ -155,9 +155,13 @@ class NL2SQLTool(BaseTool):
                 raw_output={"sql": sql, "note": "no_db_session"},
             )
 
+        sql_to_execute = sql.strip().rstrip(";")
+        if not re.search(r"\bLIMIT\b", sql_to_execute, re.IGNORECASE):
+            sql_to_execute = f"{sql_to_execute} LIMIT {input_data.max_rows}"
+
         try:
             result = await self._db.execute(
-                text(sql + f" LIMIT {input_data.max_rows}")
+                text(sql_to_execute)
             )
             rows: List[Dict[str, Any]] = [dict(row._mapping) for row in result]
             columns = list(result.keys()) if result.keys() else []
