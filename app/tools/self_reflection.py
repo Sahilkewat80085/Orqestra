@@ -115,7 +115,10 @@ Return ONLY the JSON object, no markdown."""
 
         try:
             response = await llm.ainvoke(prompt)
-            data = json.loads(response.content.strip())
+            raw = response.content.strip()
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+            data = json.loads(raw)
         except (json.JSONDecodeError, Exception) as e:
             return SelfReflectionOutput(
                 tool_name="self_reflection",
