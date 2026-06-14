@@ -84,6 +84,29 @@ class TraceRepository:
         ]
         trace.total_tokens_used = sum(b.used for b in context.token_usage.values())
 
+        # Persist new tool call logs for analytics
+        existing_result = await self._session.execute(
+            select(ToolCallLog.call_id).where(ToolCallLog.trace_id == trace.id)
+        )
+        existing_call_ids = set(existing_result.scalars().all())
+
+        for tc in context.tool_calls:
+            if tc.call_id not in existing_call_ids:
+                tool_log = ToolCallLog(
+                    call_id=tc.call_id,
+                    trace_id=trace.id,
+                    tool_name=tc.tool_name,
+                    agent_id=tc.agent_id,
+                    input_data=tc.input,
+                    output_data=tc.output,
+                    status="success" if tc.accepted else "failed",
+                    latency_ms=tc.latency_ms or 0.0,
+                    retry_count=tc.retry_count,
+                    accepted=tc.accepted,
+                    failure_type=tc.failure_type,
+                )
+                self._session.add(tool_log)
+
         from datetime import datetime
         trace.completed_at = datetime.utcnow()
         return trace
