@@ -43,9 +43,10 @@ async def stream_query_events(query_id: str) -> AsyncGenerator[str, None]:
     # Send a connection acknowledgment
     yield _format_sse({"type": "connected", "query_id": query_id})
 
+    import time
     try:
-        elapsed = 0.0
-        while elapsed < _TIMEOUT_SECS:
+        start_time = time.perf_counter()
+        while (time.perf_counter() - start_time) < _TIMEOUT_SECS:
             message = await pubsub.get_message(
                 ignore_subscribe_messages=True, timeout=1.0
             )
@@ -66,9 +67,8 @@ async def stream_query_events(query_id: str) -> AsyncGenerator[str, None]:
                     pass  # Malformed event — continue listening
 
             await asyncio.sleep(0.05)
-            elapsed += 0.05
 
-        if elapsed >= _TIMEOUT_SECS:
+        if (time.perf_counter() - start_time) >= _TIMEOUT_SECS:
             yield _format_sse({"type": "timeout", "query_id": query_id})
 
     finally:
