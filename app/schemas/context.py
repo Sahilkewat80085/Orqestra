@@ -86,7 +86,7 @@ class TokenBudget(BaseModel):
         new_used = self.used + tokens
         return self.model_copy(update={
             "used": new_used,
-            "remaining": max(0, self.allocated - new_used),
+            "remaining": self.allocated - new_used,
         })
 
 
