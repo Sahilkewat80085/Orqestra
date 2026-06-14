@@ -58,8 +58,8 @@ class CritiqueAgent(BaseAgent):
         # Build the outputs summary for critique
         outputs_text = ""
         for agent_id, output in context.agent_outputs.items():
-            if agent_id == AgentID.ORCHESTRATOR:
-                continue  # Don't critique orchestrator routing decisions
+            if agent_id in (AgentID.ORCHESTRATOR, AgentID.CRITIQUE):
+                continue  # Don't critique orchestrator or critique agent itself
             outputs_text += f"\n[{agent_id}]:\n{output.raw_output[:1500]}\n"
 
         if not outputs_text.strip():
