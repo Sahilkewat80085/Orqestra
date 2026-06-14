@@ -51,7 +51,7 @@ class ContextBudgetManager:
 
     def __init__(self, context: SharedContext):
         self._context = context
-        self._budgets: Dict[str, TokenBudget] = {}
+        self._budgets: Dict[str, TokenBudget] = dict(context.token_usage)
 
     def initialize_budgets(self) -> SharedContext:
         """
