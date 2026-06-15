@@ -15,7 +15,10 @@ from __future__ import annotations
 import uuid
 from typing import List
 
-import chromadb
+try:
+    import chromadb
+except ImportError:
+    chromadb = None
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 from app.agents.base import BaseAgent
@@ -30,6 +33,8 @@ _MIN_HOPS = 2
 
 def _get_chroma_collection():
     """Initialize ChromaDB client and return the configured collection."""
+    if chromadb is None:
+        raise ImportError("ChromaDB is not installed or available.")
     client = chromadb.PersistentClient(path=settings.chroma_persist_dir)
     try:
         return client.get_collection(settings.chroma_collection_name)
