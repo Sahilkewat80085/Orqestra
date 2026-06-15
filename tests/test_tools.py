@@ -60,7 +60,7 @@ def test_tool_call_record_has_hash():
     tool = WebSearchTool()
     inp = WebSearchInput(query="test")
     result, record = asyncio.get_event_loop().run_until_complete(
-        tool.run(inp, agent_id="test", query_id="test-128")
+        tool.run(inp, agent_id="retrieval", query_id="test-128")
     )
     assert record.call_id is not None
     assert record.timestamp is not None
