@@ -12,20 +12,25 @@ Rules:
 """
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Any
 
 from app.config import settings
 from app.logging.logger import get_logger
 from app.schemas.context import (
-    AgentID, PolicyViolation, SharedContext, TokenBudget,
+    PolicyViolation,
+    SharedContext,
+    TokenBudget,
 )
 from app.utils.token_counter import count_tokens
 
 log = get_logger("orchestrator.budget")
 
+_STRUCTURED_MARKERS: tuple[str, ...] = ("{", "}", "[", "]", '"id"', '"chunk"')
+
 
 class BudgetExceededError(Exception):
     """Raised when an agent exceeds its token budget without permission."""
+
     def __init__(self, agent_id: str, tokens_over: int):
         self.agent_id = agent_id
         self.tokens_over = tokens_over
@@ -51,15 +56,15 @@ class ContextBudgetManager:
 
     def __init__(self, context: SharedContext):
         self._context = context
-        self._budgets: Dict[str, TokenBudget] = dict(context.token_usage)
+        self._budgets: dict[str, TokenBudget] = dict(context.token_usage)
 
     def initialize_budgets(self) -> SharedContext:
         """
         Allocate token budgets for all agents based on settings.
-        Returns the updated SharedContext with budgets set.
+        Performs a single-pass update on SharedContext to avoid redundant copying.
         """
         agent_budgets = settings.agent_budgets
-        ctx = self._context
+        new_budgets = dict(self._context.token_usage)
 
         for agent_id, allocated in agent_budgets.items():
             budget = TokenBudget(
@@ -68,11 +73,11 @@ class ContextBudgetManager:
                 remaining=allocated,
             )
             self._budgets[agent_id] = budget
-            ctx = ctx.update_budget(agent_id, budget)
+            new_budgets[agent_id] = budget
 
-        self._context = ctx
+        self._context = self._context.model_copy(update={"token_usage": new_budgets})
         log.info("budgets_initialized", agent_budgets=agent_budgets)
-        return ctx
+        return self._context
 
     def check_budget(
         self, agent_id: str, text: str, raise_on_exceed: bool = True
@@ -164,17 +169,19 @@ class ContextBudgetManager:
             return text
 
         if preserve_structured:
-            # Simple heuristic: preserve any line containing JSON-like content
-            lines = text.splitlines()
-            important = [l for l in lines if any(
-                c in l for c in ["{", "}", "[", "]", '"id"', '"chunk"']
-            )]
-            filler = [l for l in lines if l not in important]
+            # Single-pass partitioning O(N) instead of quadratic scan
+            important: list[str] = []
+            filler: list[str] = []
+            for line in text.splitlines():
+                if any(marker in line for marker in _STRUCTURED_MARKERS):
+                    important.append(line)
+                else:
+                    filler.append(line)
 
             # Truncate filler to fit budget
             budget_chars = budget.remaining * 4  # ~4 chars per token
             filler_budget = budget_chars - sum(len(l) for l in important)
-            filler_text = "\n".join(filler)[:max(0, filler_budget)]
+            filler_text = "\n".join(filler)[: max(0, filler_budget)]
 
             compressed = "\n".join(important) + "\n" + filler_text
         else:
@@ -200,7 +207,7 @@ class ContextBudgetManager:
     def context(self) -> SharedContext:
         return self._context
 
-    def get_budget_summary(self) -> Dict[str, dict]:
+    def get_budget_summary(self) -> dict[str, dict[str, Any]]:
         return {
             agent_id: {
                 "allocated": b.allocated,
