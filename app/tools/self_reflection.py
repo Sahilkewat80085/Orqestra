@@ -13,16 +13,54 @@ Failure contract:
 from __future__ import annotations
 
 import json
+import re
+from typing import Any
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 from app.config import settings
 from app.schemas.context import SharedContext, ToolName
 from app.schemas.tools import (
-    ContradictionFound, RetryEligibility, SelfReflectionInput,
-    SelfReflectionOutput, ToolFailureContract, ToolStatus,
+    ContradictionFound,
+    RetryEligibility,
+    SelfReflectionInput,
+    SelfReflectionOutput,
+    ToolFailureContract,
+    ToolStatus,
 )
 from app.tools.base import BaseTool
+
+_JSON_BLOCK_RE: re.Pattern[str] = re.compile(
+    r"```(?:json)?\s*([\s\S]*?)\s*```",
+    re.IGNORECASE,
+)
+
+_DEFAULT_FAILURE_CONTRACT = ToolFailureContract(
+    tool_name="self_reflection",
+    timeout_secs=30,
+    timeout_retry_eligible=True,
+    malformed_input_retry_eligible=False,
+    empty_result_retry_eligible=False,
+    rate_limit_retry_eligible=False,
+    max_retries=1,
+    fallback_strategy="skip",
+)
+
+
+def _extract_json_text(raw: str) -> str:
+    """Extract clean JSON payload even if wrapped in markdown code blocks or surrounding text."""
+    text = raw.strip()
+    match = _JSON_BLOCK_RE.search(text)
+    if match:
+        return match.group(1).strip()
+
+    # Fallback: extract substring between first '{' and last '}'
+    first_brace = text.find("{")
+    last_brace = text.rfind("}")
+    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+        return text[first_brace : last_brace + 1]
+
+    return text
 
 
 class SelfReflectionTool(BaseTool):
@@ -31,8 +69,17 @@ class SelfReflectionTool(BaseTool):
     to identify contradictions, reasoning gaps, and improvement opportunities.
     """
 
-    def __init__(self, context: SharedContext):
+    def __init__(
+        self,
+        context: SharedContext,
+        llm: ChatGoogleGenerativeAI | None = None,
+    ) -> None:
         self._context = context
+        self._llm = llm or ChatGoogleGenerativeAI(
+            model=settings.gemini_model,
+            google_api_key=settings.google_api_key,
+            temperature=0.0,
+        )
 
     @property
     def tool_name(self) -> ToolName:
@@ -40,25 +87,21 @@ class SelfReflectionTool(BaseTool):
 
     @property
     def failure_contract(self) -> ToolFailureContract:
-        return ToolFailureContract(
-            tool_name="self_reflection",
-            timeout_secs=30,
-            timeout_retry_eligible=True,
-            malformed_input_retry_eligible=False,
-            empty_result_retry_eligible=False,
-            rate_limit_retry_eligible=False,
-            max_retries=1,
-            fallback_strategy="skip",
-        )
+        return _DEFAULT_FAILURE_CONTRACT
 
     def _validate_input(self, input_data: SelfReflectionInput) -> str | None:
-        available = list(self._context.agent_outputs.keys())
-        for agent_id in input_data.focus_agent_ids:
-            if agent_id not in available:
-                return (
-                    f"Agent '{agent_id}' has no output in context. "
-                    f"Available: {available}"
-                )
+        available_set = set(self._context.agent_outputs.keys())
+        missing = [
+            agent_id
+            for agent_id in input_data.focus_agent_ids
+            if agent_id not in available_set
+        ]
+        if missing:
+            return (
+                f"Agent(s) {missing} have no output in context. "
+                f"Available: {list(available_set)}"
+            )
+
         if len(input_data.focus_agent_ids) < 2:
             return "At least two agent IDs required for contradiction detection"
         return None
@@ -107,18 +150,10 @@ Return a JSON object with this exact structure:
 
 Return ONLY the JSON object, no markdown."""
 
-        llm = ChatGoogleGenerativeAI(
-            model=settings.gemini_model,
-            google_api_key=settings.google_api_key,
-            temperature=0.0,
-        )
-
         try:
-            response = await llm.ainvoke(prompt)
-            raw = response.content.strip()
-            if raw.startswith("```"):
-                raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-            data = json.loads(raw)
+            response = await self._llm.ainvoke(prompt)
+            clean_json = _extract_json_text(str(response.content))
+            data: dict[str, Any] = json.loads(clean_json)
         except (json.JSONDecodeError, Exception) as e:
             return SelfReflectionOutput(
                 tool_name="self_reflection",
