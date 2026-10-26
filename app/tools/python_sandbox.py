@@ -12,14 +12,12 @@ import ast
 import asyncio
 import sys
 import time
-from typing import Any
 
 from app.config import settings
 from app.schemas.context import ToolName
 from app.schemas.tools import (
     PythonSandboxInput,
     PythonSandboxOutput,
-    RetryEligibility,
     ToolFailureContract,
     ToolStatus,
 )
@@ -27,30 +25,36 @@ from app.tools.base import BaseTool
 
 
 def _validate_code_imports(code: str, allowed: list[str]) -> str | None:
-    """Parse the code and traverse AST to ensure no blocked imports or syntax errors."""
+    """
+    Parse the code and traverse AST to ensure no blocked imports or syntax errors.
+    Uses O(1) set lookups for allowed modules.
+    """
     try:
         tree = ast.parse(code)
     except SyntaxError as exc:
         return f"Syntax error: {exc}"
 
+    allowed_set: set[str] = set(allowed)
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                top_level = alias.name.split(".")[0]
-                if top_level not in allowed:
+                top_level = alias.name.split(".", 1)[0]
+                if top_level not in allowed_set:
                     return f"Import of module '{top_level}' is not allowed"
         elif isinstance(node, ast.ImportFrom):
             if node.module:
-                top_level = node.module.split(".")[0]
-                if top_level not in allowed:
+                top_level = node.module.split(".", 1)[0]
+                if top_level not in allowed_set:
                     return f"Import of module '{top_level}' is not allowed"
         elif isinstance(node, ast.Call):
-            if isinstance(node.func, ast.Name) and node.func.id == "__import__":
+            func = node.func
+            if isinstance(func, ast.Name) and func.id == "__import__":
                 return "Dynamic imports via __import__ are not allowed"
-            elif (
-                isinstance(node.func, ast.Attribute)
-                and isinstance(node.func.value, ast.Name)
-                and node.func.value.id == "importlib"
+            if (
+                isinstance(func, ast.Attribute)
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "importlib"
             ):
                 return "Imports via importlib are not allowed"
     return None
@@ -62,13 +66,8 @@ class PythonSandboxTool(BaseTool):
     Before execution, checks the code for syntax errors and banned imports.
     """
 
-    @property
-    def tool_name(self) -> ToolName:
-        return ToolName.PYTHON_SANDBOX
-
-    @property
-    def failure_contract(self) -> ToolFailureContract:
-        return ToolFailureContract(
+    def __init__(self) -> None:
+        self._contract = ToolFailureContract(
             tool_name="python_sandbox",
             timeout_secs=settings.python_sandbox_timeout_secs,
             timeout_retry_eligible=False,
@@ -79,16 +78,21 @@ class PythonSandboxTool(BaseTool):
             fallback_strategy="skip",
         )
 
+    @property
+    def tool_name(self) -> ToolName:
+        return ToolName.PYTHON_SANDBOX
+
+    @property
+    def failure_contract(self) -> ToolFailureContract:
+        return self._contract
+
     def _validate_input(self, input_data: PythonSandboxInput) -> str | None:
-        if not input_data.code or not input_data.code.strip():
+        code = input_data.code
+        if not code or not code.strip():
             return "Code must not be empty"
 
         # Check syntax and banned imports
-        import_error = _validate_code_imports(input_data.code, input_data.allowed_imports)
-        if import_error:
-            return import_error
-
-        return None
+        return _validate_code_imports(code, input_data.allowed_imports)
 
     async def _execute(self, input_data: PythonSandboxInput) -> PythonSandboxOutput:
         start_time = time.perf_counter()
@@ -111,11 +115,12 @@ class PythonSandboxTool(BaseTool):
         except asyncio.TimeoutError:
             try:
                 proc.kill()
+                await proc.wait()
             except Exception:
                 pass
             raise
 
-        latency_ms = (time.perf_counter() - start_time) * 1000
+        latency_ms = (time.perf_counter() - start_time) * 1000.0
         stdout = stdout_bytes.decode("utf-8", errors="replace")
         stderr = stderr_bytes.decode("utf-8", errors="replace")
 
