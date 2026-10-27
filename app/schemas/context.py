@@ -12,12 +12,17 @@ RULES:
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+
+def _utc_now() -> datetime:
+    """Return timezone-aware current UTC datetime."""
+    return datetime.now(timezone.utc)
 
 
 # ── Enumerations ──────────────────────────────────────────────────────────────
@@ -60,7 +65,7 @@ class ExecutionStatus(str, Enum):
 class Citation(BaseModel):
     """Tracks which retrieved chunk contributed to which claim."""
     chunk_id: str
-    source_url: Optional[str] = None
+    source_url: str | None = None
     excerpt: str
     relevance_score: float = Field(ge=0.0, le=1.0)
     contributing_to_claim: str  # The claim this citation supports
@@ -70,8 +75,8 @@ class ProvenanceEntry(BaseModel):
     """Sentence-level provenance: maps each output sentence to its origin."""
     sentence: str
     agent_id: AgentID
-    tool_calls: List[str] = Field(default_factory=list)   # call_ids
-    chunk_ids: List[str] = Field(default_factory=list)
+    tool_calls: list[str] = Field(default_factory=list)  # call_ids
+    chunk_ids: list[str] = Field(default_factory=list)
     confidence: float = Field(ge=0.0, le=1.0)
 
 
@@ -82,7 +87,7 @@ class TokenBudget(BaseModel):
     remaining: int
     compressed: bool = False
 
-    def consume(self, tokens: int) -> "TokenBudget":
+    def consume(self, tokens: int) -> TokenBudget:
         new_used = self.used + tokens
         return self.model_copy(update={
             "used": new_used,
@@ -95,23 +100,23 @@ class ToolCallRecord(BaseModel):
     call_id: str = Field(default_factory=lambda: str(uuid4()))
     tool_name: ToolName
     agent_id: AgentID
-    input: Dict[str, Any]
-    output: Optional[Dict[str, Any]] = None
-    latency_ms: Optional[float] = None
+    input: dict[str, Any]
+    output: dict[str, Any] | None = None
+    latency_ms: float | None = None
     retry_count: int = 0
     accepted: bool = True
-    failure_type: Optional[FailureType] = None
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    failure_type: FailureType | None = None
+    timestamp: datetime = Field(default_factory=_utc_now)
 
 
 class RetryEvent(BaseModel):
     """Logged every time the orchestrator triggers a retry."""
     agent_id: AgentID
-    tool_name: Optional[ToolName] = None
+    tool_name: ToolName | None = None
     attempt: int
     reason: str
     failure_type: FailureType
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=_utc_now)
 
 
 class PolicyViolation(BaseModel):
@@ -119,18 +124,18 @@ class PolicyViolation(BaseModel):
     agent_id: AgentID
     violation_type: str
     detail: str
-    tokens_over_budget: Optional[int] = None
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    tokens_over_budget: int | None = None
+    timestamp: datetime = Field(default_factory=_utc_now)
 
 
 class AgentOutput(BaseModel):
     """Typed container for any agent's output stored in shared context."""
     agent_id: AgentID
     raw_output: str
-    structured_output: Optional[Dict[str, Any]] = None
-    confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    structured_output: dict[str, Any] | None = None
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     token_count: int = 0
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=_utc_now)
 
 
 # ── SharedContext ─────────────────────────────────────────────────────────────
@@ -144,77 +149,77 @@ class SharedContext(BaseModel):
     List fields are append-only — nothing is ever deleted to preserve audit trails.
     """
 
+    model_config = ConfigDict(use_enum_values=True)
+
     # Identity
     query_id: UUID = Field(default_factory=uuid4)
     user_query: str
 
     # Agent outputs — keyed by AgentID value (string)
-    agent_outputs: Dict[str, AgentOutput] = Field(default_factory=dict)
+    agent_outputs: dict[str, AgentOutput] = Field(default_factory=dict)
 
     # Tool call audit log (append-only)
-    tool_calls: List[ToolCallRecord] = Field(default_factory=list)
+    tool_calls: list[ToolCallRecord] = Field(default_factory=list)
 
     # Retrieved citations (append-only)
-    citations: List[Citation] = Field(default_factory=list)
+    citations: list[Citation] = Field(default_factory=list)
 
     # Per-agent token budgets — keyed by AgentID value
-    token_usage: Dict[str, TokenBudget] = Field(default_factory=dict)
+    token_usage: dict[str, TokenBudget] = Field(default_factory=dict)
 
     # Sentence-level provenance map (append-only)
-    provenance: List[ProvenanceEntry] = Field(default_factory=list)
+    provenance: list[ProvenanceEntry] = Field(default_factory=list)
 
     # Retry history (append-only)
-    retry_history: List[RetryEvent] = Field(default_factory=list)
+    retry_history: list[RetryEvent] = Field(default_factory=list)
 
     # Policy violations (append-only)
-    policy_violations: List[PolicyViolation] = Field(default_factory=list)
+    policy_violations: list[PolicyViolation] = Field(default_factory=list)
 
     # Lifecycle timestamps — e.g. {"started": datetime, "orchestrator_done": datetime}
-    timestamps: Dict[str, datetime] = Field(default_factory=dict)
+    timestamps: dict[str, datetime] = Field(default_factory=dict)
 
     # Orchestrator routing decision (set once per run)
-    routing_decision: Optional[Dict[str, Any]] = None
+    routing_decision: dict[str, Any] | None = None
 
     # Decomposition task graph
-    task_graph: Optional[Dict[str, Any]] = None
+    task_graph: dict[str, Any] | None = None
 
     # Final synthesized answer
-    final_answer: Optional[str] = None
+    final_answer: str | None = None
 
     # Execution lifecycle
     status: ExecutionStatus = ExecutionStatus.PENDING
 
-    class Config:
-        use_enum_values = True
-
     # ── Helpers ───────────────────────────────────────────────────────────────
 
-    def mark_timestamp(self, key: str) -> "SharedContext":
+    def mark_timestamp(self, key: str) -> SharedContext:
         updated = dict(self.timestamps)
-        updated[key] = datetime.utcnow()
+        updated[key] = _utc_now()
         return self.model_copy(update={"timestamps": updated})
 
-    def add_tool_call(self, record: ToolCallRecord) -> "SharedContext":
+    def add_tool_call(self, record: ToolCallRecord) -> SharedContext:
         return self.model_copy(update={"tool_calls": [*self.tool_calls, record]})
 
-    def add_citation(self, citation: Citation) -> "SharedContext":
+    def add_citation(self, citation: Citation) -> SharedContext:
         return self.model_copy(update={"citations": [*self.citations, citation]})
 
-    def add_provenance(self, entry: ProvenanceEntry) -> "SharedContext":
+    def add_provenance(self, entry: ProvenanceEntry) -> SharedContext:
         return self.model_copy(update={"provenance": [*self.provenance, entry]})
 
-    def add_retry(self, event: RetryEvent) -> "SharedContext":
+    def add_retry(self, event: RetryEvent) -> SharedContext:
         return self.model_copy(update={"retry_history": [*self.retry_history, event]})
 
-    def add_violation(self, violation: PolicyViolation) -> "SharedContext":
+    def add_violation(self, violation: PolicyViolation) -> SharedContext:
         return self.model_copy(update={"policy_violations": [*self.policy_violations, violation]})
 
-    def set_agent_output(self, output: AgentOutput) -> "SharedContext":
+    def set_agent_output(self, output: AgentOutput) -> SharedContext:
         updated = dict(self.agent_outputs)
-        updated[output.agent_id] = output
+        agent_key = output.agent_id.value if isinstance(output.agent_id, Enum) else str(output.agent_id)
+        updated[agent_key] = output
         return self.model_copy(update={"agent_outputs": updated})
 
-    def update_budget(self, agent_id: str, budget: TokenBudget) -> "SharedContext":
+    def update_budget(self, agent_id: str, budget: TokenBudget) -> SharedContext:
         updated = dict(self.token_usage)
         updated[agent_id] = budget
         return self.model_copy(update={"token_usage": updated})
