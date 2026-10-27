@@ -7,8 +7,10 @@ Yields text/event-stream formatted events until PIPELINE_COMPLETE.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncGenerator
 import json
-from typing import AsyncGenerator
+import time
+from typing import Any
 
 import redis.asyncio as aioredis
 
@@ -17,6 +19,19 @@ from app.streaming.events import EventType, StreamEvent
 
 _CHANNEL_PREFIX = "orqestra:stream:"
 _TIMEOUT_SECS = 120  # Max time to wait for pipeline completion
+
+_TERMINAL_EVENT_TYPES: frozenset[EventType] = frozenset(
+    {
+        EventType.PIPELINE_COMPLETE,
+        EventType.PIPELINE_ERROR,
+        EventType.FINAL_ANSWER,
+    }
+)
+
+
+def _format_sse(data: dict[str, Any]) -> str:
+    """Format a dict as a proper SSE data field."""
+    return f"data: {json.dumps(data)}\n\n"
 
 
 async def stream_query_events(query_id: str) -> AsyncGenerator[str, None]:
@@ -43,7 +58,6 @@ async def stream_query_events(query_id: str) -> AsyncGenerator[str, None]:
     # Send a connection acknowledgment
     yield _format_sse({"type": "connected", "query_id": query_id})
 
-    import time
     try:
         start_time = time.perf_counter()
         while (time.perf_counter() - start_time) < _TIMEOUT_SECS:
@@ -57,11 +71,7 @@ async def stream_query_events(query_id: str) -> AsyncGenerator[str, None]:
                     yield _format_sse(event.model_dump(mode="json"))
 
                     # Terminal event — close stream
-                    if event.event_type in (
-                        EventType.PIPELINE_COMPLETE,
-                        EventType.PIPELINE_ERROR,
-                        EventType.FINAL_ANSWER,
-                    ):
+                    if event.event_type in _TERMINAL_EVENT_TYPES:
                         break
                 except Exception:
                     pass  # Malformed event — continue listening
@@ -72,11 +82,15 @@ async def stream_query_events(query_id: str) -> AsyncGenerator[str, None]:
             yield _format_sse({"type": "timeout", "query_id": query_id})
 
     finally:
-        await pubsub.unsubscribe(channel)
-        await pubsub.aclose()
-        await redis.aclose()
-
-
-def _format_sse(data: dict) -> str:
-    """Format a dict as a proper SSE data field."""
-    return f"data: {json.dumps(data)}\n\n"
+        try:
+            await pubsub.unsubscribe(channel)
+        except Exception:
+            pass
+        try:
+            await pubsub.aclose()
+        except Exception:
+            pass
+        try:
+            await redis.aclose()
+        except Exception:
+            pass
