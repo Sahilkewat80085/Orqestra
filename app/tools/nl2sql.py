@@ -12,7 +12,7 @@ Failure contract:
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List
+from typing import Any
 
 import sqlparse
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -22,20 +22,32 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.schemas.context import ToolName
 from app.schemas.tools import (
-    NL2SQLInput, NL2SQLOutput, RetryEligibility, ToolFailureContract, ToolStatus,
+    NL2SQLInput,
+    NL2SQLOutput,
+    RetryEligibility,
+    ToolFailureContract,
+    ToolStatus,
 )
 from app.tools.base import BaseTool
 
 # Allowlist of safe SQL statement types
-_ALLOWED_SQL_TYPES = {"SELECT"}
-# Patterns that indicate SQL injection attempts
-_INJECTION_PATTERNS = [
+_ALLOWED_SQL_TYPES: frozenset[str] = frozenset({"SELECT"})
+
+# Pre-compiled regex patterns that indicate SQL injection attempts
+_INJECTION_PATTERNS: tuple[str, ...] = (
     r";\s*(DROP|DELETE|UPDATE|INSERT|ALTER|CREATE|TRUNCATE)",
     r"--\s*$",
     r"/\*.*\*/",
     r"xp_cmdshell",
     r"EXEC\s*\(",
-]
+)
+_COMPILED_INJECTION_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(p, re.IGNORECASE | re.DOTALL) for p in _INJECTION_PATTERNS
+)
+
+_SQL_FENCE_START: re.Pattern[str] = re.compile(r"^```(?:sql)?\s*", re.IGNORECASE)
+_SQL_FENCE_END: re.Pattern[str] = re.compile(r"\s*```$", re.IGNORECASE)
+_LIMIT_PATTERN: re.Pattern[str] = re.compile(r"\bLIMIT\b", re.IGNORECASE)
 
 _SCHEMA_HINT = """
 Tables available:
@@ -53,16 +65,14 @@ class NL2SQLTool(BaseTool):
     against the local PostgreSQL database.
     """
 
-    def __init__(self, db_session: AsyncSession | None = None):
+    def __init__(
+        self,
+        db_session: AsyncSession | None = None,
+        llm: ChatGoogleGenerativeAI | None = None,
+    ) -> None:
         self._db = db_session
-
-    @property
-    def tool_name(self) -> ToolName:
-        return ToolName.NL2SQL
-
-    @property
-    def failure_contract(self) -> ToolFailureContract:
-        return ToolFailureContract(
+        self._llm = llm
+        self._contract = ToolFailureContract(
             tool_name="nl2sql",
             timeout_secs=15,
             timeout_retry_eligible=True,
@@ -72,6 +82,23 @@ class NL2SQLTool(BaseTool):
             max_retries=settings.tool_max_retries,
             fallback_strategy="skip",
         )
+
+    def _get_llm(self) -> ChatGoogleGenerativeAI:
+        if self._llm is None:
+            self._llm = ChatGoogleGenerativeAI(
+                model=settings.gemini_model,
+                google_api_key=settings.google_api_key,
+                temperature=0.0,
+            )
+        return self._llm
+
+    @property
+    def tool_name(self) -> ToolName:
+        return ToolName.NL2SQL
+
+    @property
+    def failure_contract(self) -> ToolFailureContract:
+        return self._contract
 
     def _validate_input(self, input_data: NL2SQLInput) -> str | None:
         if not input_data.natural_language_query.strip():
@@ -92,19 +119,15 @@ class NL2SQLTool(BaseTool):
         if stmt_type not in _ALLOWED_SQL_TYPES:
             return f"Only SELECT statements are permitted, got: {stmt_type}"
 
-        for pattern in _INJECTION_PATTERNS:
-            if re.search(pattern, sql, re.IGNORECASE | re.DOTALL):
-                return f"SQL contains disallowed pattern: {pattern}"
+        for pattern, raw_pat in zip(_COMPILED_INJECTION_PATTERNS, _INJECTION_PATTERNS):
+            if pattern.search(sql):
+                return f"SQL contains disallowed pattern: {raw_pat}"
 
         return None
 
     async def _generate_sql(self, nl_query: str, schema_hint: str) -> str:
         """Use Gemini to generate SQL from natural language."""
-        llm = ChatGoogleGenerativeAI(
-            model=settings.gemini_model,
-            google_api_key=settings.google_api_key,
-            temperature=0.0,
-        )
+        llm = self._get_llm()
         prompt = (
             f"Generate a safe PostgreSQL SELECT query for the following question.\n"
             f"Schema:\n{schema_hint}\n\n"
@@ -112,10 +135,10 @@ class NL2SQLTool(BaseTool):
             f"Return ONLY the SQL query, no explanation, no markdown."
         )
         response = await llm.ainvoke(prompt)
-        sql = response.content.strip()
+        sql = str(response.content).strip()
         # Strip markdown code fences if present
-        sql = re.sub(r"^```(?:sql)?\n?", "", sql, flags=re.IGNORECASE)
-        sql = re.sub(r"\n?```$", "", sql)
+        sql = _SQL_FENCE_START.sub("", sql)
+        sql = _SQL_FENCE_END.sub("", sql)
         return sql.strip()
 
     async def _execute(self, input_data: NL2SQLInput) -> NL2SQLOutput:
@@ -156,15 +179,13 @@ class NL2SQLTool(BaseTool):
             )
 
         sql_to_execute = sql.strip().rstrip(";")
-        if not re.search(r"\bLIMIT\b", sql_to_execute, re.IGNORECASE):
+        if not _LIMIT_PATTERN.search(sql_to_execute):
             sql_to_execute = f"{sql_to_execute} LIMIT {input_data.max_rows}"
 
         try:
-            result = await self._db.execute(
-                text(sql_to_execute)
-            )
-            rows: List[Dict[str, Any]] = [dict(row._mapping) for row in result]
-            columns = list(result.keys()) if result.keys() else []
+            result = await self._db.execute(text(sql_to_execute))
+            rows: list[dict[str, Any]] = [dict(row._mapping) for row in result]
+            columns: list[str] = list(result.keys()) if result.keys() else []
         except Exception as e:
             return NL2SQLOutput(
                 tool_name="nl2sql",
