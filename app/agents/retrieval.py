@@ -12,13 +12,13 @@ Rules (non-negotiable):
 """
 from __future__ import annotations
 
-import uuid
-from typing import List
+from typing import Any
 
 try:
     import chromadb
 except ImportError:
     chromadb = None
+
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 from app.agents.base import BaseAgent
@@ -30,14 +30,21 @@ from app.utils.token_counter import count_tokens
 _MIN_CHUNKS = 2
 _MIN_HOPS = 2
 
+_CACHED_COLLECTION: Any = None
 
-def _get_chroma_collection():
-    """Initialize ChromaDB client and return the configured collection."""
+
+def _get_chroma_collection() -> Any:
+    """Initialize ChromaDB client and return the configured collection (cached)."""
+    global _CACHED_COLLECTION
+    if _CACHED_COLLECTION is not None:
+        return _CACHED_COLLECTION
+
     if chromadb is None:
         raise ImportError("ChromaDB is not installed or available.")
+
     client = chromadb.PersistentClient(path=settings.chroma_persist_dir)
     try:
-        return client.get_collection(settings.chroma_collection_name)
+        collection = client.get_collection(settings.chroma_collection_name)
     except Exception:
         # Collection doesn't exist yet — create with sample data
         collection = client.get_or_create_collection(
@@ -45,10 +52,12 @@ def _get_chroma_collection():
             metadata={"hnsw:space": "cosine"},
         )
         _seed_collection(collection)
-        return collection
+
+    _CACHED_COLLECTION = collection
+    return _CACHED_COLLECTION
 
 
-def _seed_collection(collection):
+def _seed_collection(collection: Any) -> None:
     """Seed with minimal knowledge base if empty."""
     docs = [
         ("chunk_001", "Large language models are neural networks trained on vast text corpora using transformer architectures. They exhibit emergent capabilities at scale."),
@@ -77,16 +86,24 @@ class RetrievalAgent(BaseAgent):
     Hop 2: Contextual expansion — search using terms from hop-1 results
     """
 
+    def __init__(self, llm: ChatGoogleGenerativeAI | None = None) -> None:
+        self._llm = llm
+
+    def _get_llm(self) -> ChatGoogleGenerativeAI:
+        if self._llm is None:
+            self._llm = ChatGoogleGenerativeAI(
+                model=settings.gemini_model,
+                google_api_key=settings.google_api_key,
+                temperature=0.0,
+            )
+        return self._llm
+
     @property
     def agent_id(self) -> str:
         return AgentID.RETRIEVAL
 
     async def _run(self, context: SharedContext) -> SharedContext:
-        llm = ChatGoogleGenerativeAI(
-            model=settings.gemini_model,
-            google_api_key=settings.google_api_key,
-            temperature=0.0,
-        )
+        llm = self._get_llm()
 
         try:
             collection = _get_chroma_collection()
@@ -101,7 +118,7 @@ class RetrievalAgent(BaseAgent):
             include=["documents", "distances", "metadatas"],
         )
 
-        hop1_chunks: List[RetrievedChunk] = []
+        hop1_chunks: list[RetrievedChunk] = []
         for i, (doc, dist, meta) in enumerate(zip(
             hop1_results["documents"][0],
             hop1_results["distances"][0],
@@ -124,7 +141,7 @@ class RetrievalAgent(BaseAgent):
         )
         try:
             expansion_response = await llm.ainvoke(expansion_prompt)
-            expansion_query = expansion_response.content.strip()
+            expansion_query = str(expansion_response.content).strip()
         except Exception:
             expansion_query = context.user_query  # fallback
 
@@ -134,7 +151,7 @@ class RetrievalAgent(BaseAgent):
             include=["documents", "distances", "metadatas"],
         )
 
-        hop2_chunks: List[RetrievedChunk] = []
+        hop2_chunks: list[RetrievedChunk] = []
         existing_ids = {c.chunk_id for c in hop1_chunks}
         for i, (doc, dist, meta) in enumerate(zip(
             hop2_results["documents"][0],
@@ -159,17 +176,16 @@ class RetrievalAgent(BaseAgent):
             return self._stub_result(context, "Insufficient chunks retrieved")
 
         # ── Build citations and provenance ─────────────────────────────────────
-        citations = []
-        provenance_entries = []
+        citations: list[Citation] = []
+        provenance_entries: list[ProvenanceEntry] = []
         for chunk in all_chunks:
             claim = f"Based on retrieved information (hop {chunk.hop}): {chunk.content[:80]}..."
-            citation = Citation(
+            citations.append(Citation(
                 chunk_id=chunk.chunk_id,
                 excerpt=chunk.content[:200],
                 relevance_score=chunk.relevance_score,
                 contributing_to_claim=claim,
-            )
-            citations.append(citation)
+            ))
             provenance_entries.append(ProvenanceEntry(
                 sentence=claim,
                 agent_id=AgentID.RETRIEVAL,
@@ -193,22 +209,27 @@ class RetrievalAgent(BaseAgent):
 
         raw_output = result.model_dump_json()
         token_count = count_tokens(raw_output)
+        avg_confidence = (
+            sum(c.relevance_score for c in all_chunks) / len(all_chunks)
+            if all_chunks
+            else 0.5
+        )
 
         output = AgentOutput(
             agent_id=AgentID.RETRIEVAL,
             raw_output=raw_output,
             structured_output=result.model_dump(),
-            confidence=sum(c.relevance_score for c in all_chunks) / len(all_chunks),
+            confidence=avg_confidence,
             token_count=token_count,
         )
 
-        updated = context.set_agent_output(output)
-        for citation in citations:
-            updated = updated.add_citation(citation)
-        for entry in provenance_entries:
-            updated = updated.add_provenance(entry)
-
-        return updated
+        # Single-pass batch context update
+        return context.set_agent_output(output).model_copy(
+            update={
+                "citations": [*context.citations, *citations],
+                "provenance": [*context.provenance, *provenance_entries],
+            }
+        )
 
     def _stub_result(self, context: SharedContext, reason: str) -> SharedContext:
         """Return a stub retrieval result when ChromaDB is unavailable."""
