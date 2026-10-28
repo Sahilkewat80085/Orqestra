@@ -15,7 +15,7 @@ Set WEB_SEARCH_MOCK=false and provide WEB_SEARCH_API_KEY for real search.
 from __future__ import annotations
 
 import asyncio
-from typing import List
+from typing import Any
 
 import httpx
 
@@ -31,12 +31,11 @@ from app.schemas.tools import (
 )
 from app.tools.base import BaseTool
 
-
 # ── Stub data ─────────────────────────────────────────────────────────────────
 # Realistic mock results used when WEB_SEARCH_MOCK=true.
 # In production, replace with Tavily/SerpAPI integration.
 
-_MOCK_RESULTS: List[WebSearchResult] = [
+_MOCK_RESULTS: list[WebSearchResult] = [
     WebSearchResult(
         title="Introduction to Large Language Models",
         url="https://arxiv.org/abs/2307.06435",
@@ -81,13 +80,9 @@ class WebSearchTool(BaseTool):
     Mock mode returns curated realistic results filtered by query terms.
     """
 
-    @property
-    def tool_name(self) -> ToolName:
-        return ToolName.WEB_SEARCH
-
-    @property
-    def failure_contract(self) -> ToolFailureContract:
-        return ToolFailureContract(
+    def __init__(self, http_client: httpx.AsyncClient | None = None) -> None:
+        self._http_client = http_client
+        self._contract = ToolFailureContract(
             tool_name="web_search",
             timeout_secs=settings.web_search_timeout_secs,
             timeout_retry_eligible=True,
@@ -97,6 +92,14 @@ class WebSearchTool(BaseTool):
             max_retries=settings.tool_max_retries,
             fallback_strategy="skip",
         )
+
+    @property
+    def tool_name(self) -> ToolName:
+        return ToolName.WEB_SEARCH
+
+    @property
+    def failure_contract(self) -> ToolFailureContract:
+        return self._contract
 
     def _validate_input(self, input_data: WebSearchInput) -> str | None:
         if not input_data.query or not input_data.query.strip():
@@ -112,15 +115,18 @@ class WebSearchTool(BaseTool):
 
     async def _mock_search(self, input_data: WebSearchInput) -> WebSearchOutput:
         """Return stub results filtered/scored against the query."""
-        await asyncio.sleep(0.05)  # Simulate network latency
+        await asyncio.sleep(0.01)  # Minimal async yield
 
-        query_lower = input_data.query.lower()
-        scored = []
+        query_words = [w for w in input_data.query.lower().split() if w]
+        scored: list[WebSearchResult] = []
+
         for result in _MOCK_RESULTS:
-            # Simple keyword overlap scoring
+            snippet_lower = result.snippet.lower()
+            title_lower = result.title.lower()
+
             overlap = sum(
-                1 for word in query_lower.split()
-                if word in result.snippet.lower() or word in result.title.lower()
+                1 for word in query_words
+                if word in snippet_lower or word in title_lower
             )
             adjusted_score = min(1.0, result.relevance_score + overlap * 0.05)
             scored.append(result.model_copy(update={"relevance_score": adjusted_score}))
@@ -156,34 +162,41 @@ class WebSearchTool(BaseTool):
                 error_message="WEB_SEARCH_API_KEY not configured",
             )
 
-        async with httpx.AsyncClient(timeout=settings.web_search_timeout_secs) as client:
-            try:
-                response = await client.post(
-                    "https://api.tavily.com/search",
-                    json={
-                        "api_key": settings.web_search_api_key,
-                        "query": input_data.query,
-                        "max_results": input_data.max_results,
-                    },
-                )
-                response.raise_for_status()
-                data = response.json()
-            except httpx.TimeoutException:
-                raise asyncio.TimeoutError()
-            except Exception as e:
-                return WebSearchOutput(
-                    tool_name="web_search",
-                    status=ToolStatus.MALFORMED_OUTPUT,
-                    retry_eligible=RetryEligibility.ELIGIBLE,
-                    error_message=str(e),
-                )
+        client = self._http_client or httpx.AsyncClient(
+            timeout=settings.web_search_timeout_secs
+        )
+        should_close = self._http_client is None
+
+        try:
+            response = await client.post(
+                "https://api.tavily.com/search",
+                json={
+                    "api_key": settings.web_search_api_key,
+                    "query": input_data.query,
+                    "max_results": input_data.max_results,
+                },
+            )
+            response.raise_for_status()
+            data: dict[str, Any] = response.json()
+        except httpx.TimeoutException:
+            raise asyncio.TimeoutError()
+        except Exception as e:
+            return WebSearchOutput(
+                tool_name="web_search",
+                status=ToolStatus.MALFORMED_OUTPUT,
+                retry_eligible=RetryEligibility.ELIGIBLE,
+                error_message=str(e),
+            )
+        finally:
+            if should_close:
+                await client.aclose()
 
         results = [
             WebSearchResult(
-                title=r.get("title", ""),
-                url=r.get("url", ""),
-                snippet=r.get("content", ""),
-                relevance_score=r.get("score", 0.5),
+                title=str(r.get("title", "")),
+                url=str(r.get("url", "")),
+                snippet=str(r.get("content", "")),
+                relevance_score=float(r.get("score", 0.5)),
             )
             for r in data.get("results", [])
         ]
