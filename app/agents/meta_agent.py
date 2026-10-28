@@ -13,7 +13,8 @@ IMPORTANT RULES:
 from __future__ import annotations
 
 import json
-from typing import List
+import re
+from typing import Any
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 
@@ -60,6 +61,26 @@ Return a JSON object:
 
 Return ONLY the JSON object."""
 
+_JSON_BLOCK_RE: re.Pattern[str] = re.compile(
+    r"```(?:json)?\s*([\s\S]*?)\s*```",
+    re.IGNORECASE,
+)
+
+
+def _extract_json_block(raw: str) -> str:
+    """Extract clean JSON text even when enclosed in markdown code fences."""
+    text = raw.strip()
+    match = _JSON_BLOCK_RE.search(text)
+    if match:
+        return match.group(1).strip()
+
+    first_brace = text.find("{")
+    last_brace = text.rfind("}")
+    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+        return text[first_brace : last_brace + 1]
+
+    return text
+
 
 class MetaPromptAgent(BaseAgent):
     """
@@ -67,20 +88,31 @@ class MetaPromptAgent(BaseAgent):
     Never auto-applies changes — all rewrites require explicit approval.
     """
 
-    def __init__(self, failed_cases: List[EvalCaseResult], current_prompts: dict):
+    def __init__(
+        self,
+        failed_cases: list[EvalCaseResult],
+        current_prompts: dict[str, Any],
+        llm: ChatGoogleGenerativeAI | None = None,
+    ) -> None:
         self._failed_cases = failed_cases
         self._current_prompts = current_prompts
+        self._llm = llm
+
+    def _get_llm(self) -> ChatGoogleGenerativeAI:
+        if self._llm is None:
+            self._llm = ChatGoogleGenerativeAI(
+                model=settings.gemini_model,
+                google_api_key=settings.google_api_key,
+                temperature=0.3,
+            )
+        return self._llm
 
     @property
     def agent_id(self) -> str:
         return AgentID.META
 
     async def _run(self, context: SharedContext) -> SharedContext:
-        llm = ChatGoogleGenerativeAI(
-            model=settings.gemini_model,
-            google_api_key=settings.google_api_key,
-            temperature=0.3,
-        )
+        llm = self._get_llm()
 
         # Format failed cases for analysis
         cases_text = json.dumps(
@@ -99,7 +131,8 @@ class MetaPromptAgent(BaseAgent):
         )
 
         prompts_text = json.dumps(
-            {k: v[:200] for k, v in self._current_prompts.items()}, indent=2
+            {k: str(v)[:200] for k, v in self._current_prompts.items()},
+            indent=2,
         )
 
         prompt = _PROMPT.format(
@@ -109,20 +142,18 @@ class MetaPromptAgent(BaseAgent):
 
         try:
             response = await llm.ainvoke(prompt)
-            raw = response.content.strip()
-            if raw.startswith("```"):
-                raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-            data = json.loads(raw)
+            clean_json = _extract_json_block(str(response.content))
+            data: dict[str, Any] = json.loads(clean_json)
 
             meta_output = MetaAgentOutput(
-                analyzed_failures=data.get("analyzed_failures", []),
-                root_cause_analysis=data.get("root_cause_analysis", ""),
+                analyzed_failures=list(data.get("analyzed_failures", [])),
+                root_cause_analysis=str(data.get("root_cause_analysis", "")),
                 proposed_rewrites=[
                     PromptRewriteDiff(**r)
                     for r in data.get("proposed_rewrites", [])
                 ],
-                priority_order=data.get("priority_order", []),
-                reasoning=data.get("reasoning", ""),
+                priority_order=list(data.get("priority_order", [])),
+                reasoning=str(data.get("reasoning", "")),
             )
         except Exception as e:
             meta_output = MetaAgentOutput(
