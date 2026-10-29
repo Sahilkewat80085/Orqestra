@@ -8,9 +8,10 @@ the right fallback without hardcoded conditional chains.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, Dict, Optional
+from typing import Any
 
 from app.schemas.context import FailureType
 
@@ -25,19 +26,21 @@ class RetryStrategy(str, Enum):
     ABORT = "abort"                           # Fatal — stop the pipeline
 
 
-@dataclass
+@dataclass(slots=True)
 class RetryDecision:
     strategy: RetryStrategy
     max_attempts: int
     backoff_base_secs: float = 1.0
-    modify_input: Optional[Callable] = None   # Optional input transformer
-    fallback_agent: Optional[str] = None      # Used with FALLBACK_AGENT
+    modify_input: Callable[..., Any] | None = None  # Optional input transformer
+    fallback_agent: str | None = None               # Used with FALLBACK_AGENT
 
+
+_DEFAULT_SKIP_DECISION = RetryDecision(strategy=RetryStrategy.SKIP, max_attempts=0)
 
 # ── Default Failure → Strategy mapping ───────────────────────────────────────
 # The orchestrator uses this table to select a strategy without hardcoded logic.
 
-DEFAULT_POLICY: Dict[FailureType, RetryDecision] = {
+DEFAULT_POLICY: dict[FailureType, RetryDecision] = {
     FailureType.TIMEOUT: RetryDecision(
         strategy=RetryStrategy.BACKOFF_RETRY,
         max_attempts=2,
@@ -82,12 +85,15 @@ class RetryPolicyEngine:
             await asyncio.sleep(decision.backoff_base_secs ** attempt)
     """
 
-    def __init__(self, custom_policy: Optional[Dict[FailureType, RetryDecision]] = None):
+    def __init__(
+        self,
+        custom_policy: dict[FailureType, RetryDecision] | None = None,
+    ) -> None:
         self._policy = custom_policy or DEFAULT_POLICY
 
     def decide(
         self, failure_type: FailureType, attempt: int
-    ) -> Optional[RetryDecision]:
+    ) -> RetryDecision | None:
         """
         Returns a RetryDecision if another attempt should be made,
         or None if the failure is terminal.
@@ -98,7 +104,7 @@ class RetryPolicyEngine:
         """
         decision = self._policy.get(failure_type)
         if decision is None:
-            return RetryDecision(strategy=RetryStrategy.SKIP, max_attempts=0)
+            return _DEFAULT_SKIP_DECISION
 
         if attempt >= decision.max_attempts:
             return None  # Terminal — no more retries
