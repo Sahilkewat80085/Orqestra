@@ -5,18 +5,17 @@ Abstract BaseAgent for all Orqestra agents.
 
 Enforces:
   - Context-only communication (no direct agent-to-agent calls)
-  - Budget check before every LLM call
   - Automatic timing and token tracking
   - Structured logging with AgentLogger
 """
 from __future__ import annotations
 
-import time
 from abc import ABC, abstractmethod
+from enum import Enum
+import time
 
 from app.logging.logger import AgentLogger
-from app.orchestrator.context_budget import ContextBudgetManager
-from app.schemas.context import SharedContext
+from app.schemas.context import ExecutionStatus, SharedContext
 
 
 class BaseAgent(ABC):
@@ -44,7 +43,8 @@ class BaseAgent(ABC):
         Handles timing, logging, and error recovery.
         Agents MUST only communicate through the returned SharedContext.
         """
-        logger = AgentLogger(self.agent_id, str(context.query_id))
+        agent_key = self.agent_id.value if isinstance(self.agent_id, Enum) else str(self.agent_id)
+        logger = AgentLogger(agent_key, str(context.query_id))
         logger.started()
 
         start = time.perf_counter()
@@ -52,16 +52,16 @@ class BaseAgent(ABC):
             updated_context = await self._run(context)
         except Exception as e:
             logger.error(str(e))
-            # On unhandled error, return context with status updated
-            return context.mark_timestamp(f"{self.agent_id}_failed").model_copy(
-                update={"status": "partial"}
+            # On unhandled error, return context with status updated to PARTIAL
+            return context.mark_timestamp(f"{agent_key}_failed").model_copy(
+                update={"status": ExecutionStatus.PARTIAL}
             )
 
-        latency_ms = (time.perf_counter() - start) * 1000
+        latency_ms = (time.perf_counter() - start) * 1000.0
 
         # Determine token count from agent's output if available
-        output = updated_context.agent_outputs.get(self.agent_id)
+        output = updated_context.agent_outputs.get(agent_key)
         token_count = output.token_count if output else 0
 
         logger.completed(latency_ms=latency_ms, token_count=token_count)
-        return updated_context.mark_timestamp(f"{self.agent_id}_completed")
+        return updated_context.mark_timestamp(f"{agent_key}_completed")
