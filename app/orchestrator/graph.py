@@ -14,7 +14,7 @@ Agents that are not selected are never invoked.
 """
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any
 
 from langgraph.graph import END, START, StateGraph
 
@@ -27,7 +27,18 @@ from app.orchestrator.router import OrchestratorRouter
 from app.schemas.context import ExecutionStatus, SharedContext
 
 # Type alias for the LangGraph state dict
-GraphState = Dict[str, Any]
+GraphState = dict[str, Any]
+
+_VALID_NODES: frozenset[str] = frozenset(
+    {"decomposition", "retrieval", "critique", "synthesis"}
+)
+
+# Persistent reusable instances
+_ROUTER = OrchestratorRouter()
+_DECOMPOSITION_AGENT = DecompositionAgent()
+_RETRIEVAL_AGENT = RetrievalAgent()
+_CRITIQUE_AGENT = CritiqueAgent()
+_SYNTHESIS_AGENT = SynthesisAgent()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -56,36 +67,31 @@ async def orchestrator_node(state: GraphState) -> GraphState:
     ctx = budget_mgr.initialize_budgets()
 
     # Produce routing decision
-    router = OrchestratorRouter()
-    ctx = await router.route(ctx)
+    ctx = await _ROUTER.route(ctx)
     return _dump(ctx)
 
 
 async def decomposition_node(state: GraphState) -> GraphState:
     ctx = _load(state)
-    agent = DecompositionAgent()
-    ctx = await agent.invoke(ctx)
+    ctx = await _DECOMPOSITION_AGENT.invoke(ctx)
     return _dump(ctx)
 
 
 async def retrieval_node(state: GraphState) -> GraphState:
     ctx = _load(state)
-    agent = RetrievalAgent()
-    ctx = await agent.invoke(ctx)
+    ctx = await _RETRIEVAL_AGENT.invoke(ctx)
     return _dump(ctx)
 
 
 async def critique_node(state: GraphState) -> GraphState:
     ctx = _load(state)
-    agent = CritiqueAgent()
-    ctx = await agent.invoke(ctx)
+    ctx = await _CRITIQUE_AGENT.invoke(ctx)
     return _dump(ctx)
 
 
 async def synthesis_node(state: GraphState) -> GraphState:
     ctx = _load(state)
-    agent = SynthesisAgent()
-    ctx = await agent.invoke(ctx)
+    ctx = await _SYNTHESIS_AGENT.invoke(ctx)
     ctx = ctx.mark_timestamp("completed").model_copy(
         update={"status": ExecutionStatus.COMPLETED}
     )
@@ -115,14 +121,11 @@ def route_after_orchestrator(state: GraphState) -> str:
     if not agents:
         return "synthesis"
     first = agents[0]
-    # Map to valid node names
-    valid_nodes = {"decomposition", "retrieval", "critique", "synthesis"}
-    return first if first in valid_nodes else "synthesis"
+    return first if first in _VALID_NODES else "synthesis"
 
 
 def route_after_decomposition(state: GraphState) -> str:
     agents = _get_plan_agents(state)
-    # Find what comes after decomposition
     if "retrieval" in agents:
         return "retrieval"
     if "critique" in agents:
