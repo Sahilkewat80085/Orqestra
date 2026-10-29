@@ -18,8 +18,9 @@ RULES:
 from __future__ import annotations
 
 import json
+import re
 import time
-from typing import Optional
+from typing import Any
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 
@@ -67,6 +68,26 @@ Return a JSON object with EXACTLY this structure:
 
 Return ONLY the JSON object, no markdown fences."""
 
+_JSON_BLOCK_RE: re.Pattern[str] = re.compile(
+    r"```(?:json)?\s*([\s\S]*?)\s*```",
+    re.IGNORECASE,
+)
+
+
+def _extract_json_block(raw: str) -> str:
+    """Extract clean JSON text even when surrounded by markdown code blocks."""
+    text = raw.strip()
+    match = _JSON_BLOCK_RE.search(text)
+    if match:
+        return match.group(1).strip()
+
+    first_brace = text.find("{")
+    last_brace = text.rfind("}")
+    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+        return text[first_brace : last_brace + 1]
+
+    return text
+
 
 class OrchestratorRouter:
     """
@@ -74,8 +95,8 @@ class OrchestratorRouter:
     This decision drives all subsequent graph edges.
     """
 
-    def __init__(self):
-        self._llm = ChatGoogleGenerativeAI(
+    def __init__(self, llm: ChatGoogleGenerativeAI | None = None) -> None:
+        self._llm = llm or ChatGoogleGenerativeAI(
             model=settings.gemini_model,
             google_api_key=settings.google_api_key,
             temperature=settings.gemini_temperature,
@@ -91,25 +112,22 @@ class OrchestratorRouter:
 
         start = time.perf_counter()
         prompt = _ORCHESTRATOR_PROMPT.format(query=context.user_query)
-        input_hash = hash_content(prompt)
 
         raw = ""
         try:
             response = await self._llm.ainvoke(prompt)
-            raw = response.content.strip()
-            # Strip markdown fences if model adds them
-            if raw.startswith("```"):
-                raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+            clean_json = _extract_json_block(str(response.content))
+            raw = clean_json
+            data: dict[str, Any] = json.loads(clean_json)
 
-            data = json.loads(raw)
             decision = RoutingDecision(
-                reasoning=data.get("reasoning", ""),
-                selected_agents=data.get("selected_agents", ["synthesis"]),
+                reasoning=str(data.get("reasoning", "")),
+                selected_agents=list(data.get("selected_agents", ["synthesis"])),
                 execution_plan=[
                     ExecutionStep(**step) for step in data.get("execution_plan", [])
                 ],
                 fallback=FallbackSpec(**data["fallback"]) if data.get("fallback") else None,
-                estimated_total_tokens=data.get("estimated_total_tokens", 0),
+                estimated_total_tokens=int(data.get("estimated_total_tokens", 0)),
                 confidence=float(data.get("confidence", 0.9)),
             )
         except Exception as e:
@@ -126,8 +144,7 @@ class OrchestratorRouter:
                 confidence=0.5,
             )
 
-        latency_ms = (time.perf_counter() - start) * 1000
-        output_hash = hash_content(decision.model_dump())
+        latency_ms = (time.perf_counter() - start) * 1000.0
         token_count = count_tokens(raw if raw else str(decision))
 
         agent_logger.completed(
@@ -145,11 +162,9 @@ class OrchestratorRouter:
             token_count=token_count,
         )
 
-        updated = (
+        return (
             context
             .set_agent_output(output)
             .mark_timestamp("orchestrator_completed")
             .model_copy(update={"routing_decision": decision.model_dump()})
         )
-
-        return updated
