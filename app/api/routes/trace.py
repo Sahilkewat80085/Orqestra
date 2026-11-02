@@ -6,6 +6,9 @@ Returns the full execution trace for any completed query.
 """
 from __future__ import annotations
 
+import uuid
+from typing import Any
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,8 +27,23 @@ router = APIRouter(prefix="/api/v1", tags=["Traces"])
         "policy violations, token usage, and provenance metadata. "
         "Supports full replay and diff between runs."
     ),
+    response_model=dict[str, Any],
 )
-async def get_trace(query_id: str, db: AsyncSession = Depends(get_db)):
+async def get_trace(
+    query_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        uuid.UUID(query_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "INVALID_QUERY_ID",
+                "message": f"'{query_id}' is not a valid UUID format",
+            },
+        )
+
     service = QueryService(db)
     trace = await service.get_trace(query_id)
 
@@ -40,3 +58,4 @@ async def get_trace(query_id: str, db: AsyncSession = Depends(get_db)):
         )
 
     return trace
+
