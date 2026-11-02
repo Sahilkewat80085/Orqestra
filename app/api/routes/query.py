@@ -6,14 +6,13 @@ Endpoint 2: GET /api/v1/query/{query_id}/stream — SSE stream
 """
 from __future__ import annotations
 
-import asyncio
+import uuid
+from typing import Final
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import AsyncSession
+from pydantic import BaseModel, Field
 
-from app.database.session import get_db
 from app.logging.logger import get_logger
 from app.schemas.context import SharedContext
 from app.streaming.subscriber import stream_query_events
@@ -22,10 +21,17 @@ from app.worker import run_query_task
 router = APIRouter(prefix="/api/v1", tags=["Query"])
 log = get_logger("api.query")
 
+_MAX_QUERY_LENGTH: Final[int] = 4096
+_SSE_HEADERS: Final[dict[str, str]] = {
+    "Cache-Control": "no-cache",
+    "X-Accel-Buffering": "no",
+    "Connection": "keep-alive",
+}
+
 
 class QueryRequest(BaseModel):
-    query: str
-    stream: bool = True
+    query: str = Field(..., description="User query text")
+    stream: bool = Field(default=True, description="Whether to enable SSE streaming")
 
 
 class QueryResponse(BaseModel):
@@ -45,11 +51,9 @@ class QueryResponse(BaseModel):
         "Connect to the stream URL to receive real-time agent activity."
     ),
 )
-async def submit_query(
-    request: QueryRequest,
-    db: AsyncSession = Depends(get_db),
-):
-    if not request.query.strip():
+async def submit_query(request: QueryRequest) -> QueryResponse:
+    cleaned_query = request.query.strip()
+    if not cleaned_query:
         raise HTTPException(
             status_code=422,
             detail={
@@ -58,16 +62,16 @@ async def submit_query(
             },
         )
 
-    if len(request.query) > 4096:
+    if len(request.query) > _MAX_QUERY_LENGTH:
         raise HTTPException(
             status_code=422,
             detail={
                 "code": "QUERY_TOO_LONG",
-                "message": "Query exceeds maximum length of 4096 characters",
+                "message": f"Query exceeds maximum length of {_MAX_QUERY_LENGTH} characters",
             },
         )
 
-    # Generate the query_id immediately
+    # Generate the query_id immediately via SharedContext
     ctx = SharedContext(user_query=request.query)
     query_id = str(ctx.query_id)
 
@@ -94,13 +98,21 @@ async def submit_query(
         "pipeline_complete events."
     ),
 )
-async def stream_query(query_id: str):
+async def stream_query(query_id: str) -> StreamingResponse:
+    try:
+        uuid.UUID(query_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "INVALID_QUERY_ID",
+                "message": f"'{query_id}' is not a valid UUID format",
+            },
+        )
+
     return StreamingResponse(
         stream_query_events(query_id),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-            "Connection": "keep-alive",
-        },
+        headers=_SSE_HEADERS,
     )
+
